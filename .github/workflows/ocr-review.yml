@@ -1,0 +1,228 @@
+name: Organization OpenCodeReview (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: Open pull request number in the caller repository
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: org-ocr-${{ github.repository }}-${{ inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    if: github.repository_owner == 'cloudhouse-org'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.gate.outputs.eligible }}
+      reason: ${{ steps.gate.outputs.reason }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
+    steps:
+      - name: Check PR membership, state, and OCR configuration
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          CALLER_EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          OCR_REVIEW_ENABLED: ${{ vars.OCR_REVIEW_ENABLED }}
+          OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_USE_ANTHROPIC }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          eligible=false
+          reason=not_eligible
+          base_sha=
+          head_sha=
+          if [[ "$REPOSITORY_OWNER" != "cloudhouse-org" ]]; then
+            reason=outside_organization
+          elif [[ "$CALLER_EVENT" != "pull_request_target" && "$CALLER_EVENT" != "workflow_dispatch" ]]; then
+            reason=unsupported_event
+          elif [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            reason=invalid_pr_number
+          elif [[ "$OCR_REVIEW_ENABLED" != "true" ]]; then
+            reason=disabled
+          elif [[ -z "$OCR_LLM_TOKEN" ]]; then
+            reason=missing_ocr_llm_token
+          elif [[ "$OCR_LLM_URL" != https://* || -z "$OCR_LLM_MODEL" ]]; then
+            reason=invalid_model_configuration
+          elif [[ "$OCR_USE_ANTHROPIC" != "true" && "$OCR_USE_ANTHROPIC" != "false" ]]; then
+            reason=invalid_model_protocol
+          else
+            if pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" 2>/dev/null)"; then
+              state="$(jq -r '.state // ""' <<< "$pr_json")"
+              author_association="$(jq -r '.author_association // ""' <<< "$pr_json")"
+              base_repository="$(jq -r '.base.repo.full_name // ""' <<< "$pr_json")"
+              head_repository="$(jq -r '.head.repo.full_name // ""' <<< "$pr_json")"
+              base_sha="$(jq -r '.base.sha // ""' <<< "$pr_json")"
+              head_sha="$(jq -r '.head.sha // ""' <<< "$pr_json")"
+              if [[ "$state" != "open" ]]; then
+                reason=pr_not_open
+              elif [[ "$base_repository" != "$REPOSITORY" || -z "$head_repository" ]]; then
+                reason=invalid_pr_repositories
+              elif [[ "$author_association" != "MEMBER" && "$author_association" != "OWNER" ]]; then
+                reason=author_not_organization_member
+              elif [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ || ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                reason=invalid_pr_revision
+              else
+                eligible=true
+                reason=eligible
+              fi
+            else
+              reason=pr_metadata_unavailable
+            fi
+          fi
+          {
+            printf 'eligible=%s\n' "$eligible"
+            printf 'reason=%s\n' "$reason"
+            printf 'base_sha=%s\n' "$base_sha"
+            printf 'head_sha=%s\n' "$head_sha"
+            printf 'pr_number=%s\n' "$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$eligible" != "true" ]]; then
+            printf 'OCR skipped: `%s`. No self-hosted runner was assigned.\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  review:
+    needs: authorize
+    if: needs.authorize.outputs.eligible == 'true'
+    runs-on:
+      group: cloudhouse-review
+      labels: [self-hosted, linux, x64, cloudhouse-review]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+      BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+      HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+    steps:
+      - name: Set isolated temporary path
+        shell: bash
+        run: echo "OCR_WORK=$RUNNER_TEMP/cloudhouse-ocr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+
+      - name: Checkout trusted target base
+        id: target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.authorize.outputs.base_sha }}
+          path: target-repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout trusted shared reviewer source
+        id: shared
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: trusted-ocr
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify trusted publisher
+        shell: bash
+        run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/trusted-ocr/ops/ocr" -p 'test_*.py'
+
+      - name: Fetch PR Git objects without checking out PR code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -m 700 "$OCR_WORK"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_VALUE_0
+          git -C "$GITHUB_WORKSPACE/target-repo" fetch --no-tags origin "pull/$PR_NUMBER/head"
+          test "$(git -C "$GITHUB_WORKSPACE/target-repo" rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          git -C "$GITHUB_WORKSPACE/target-repo" merge-base "$BASE_SHA" "$HEAD_SHA" > "$OCR_WORK/merge-base"
+
+      - name: Install verified OCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            https://github.com/alibaba/open-code-review/releases/download/v1.12.11/opencodereview-linux-amd64 -o "$OCR_WORK/ocr"
+          echo 'ae202b88fa03e16926512487bf1051d37ccb3f9690bdd74b889d11ea4dd8099b  '"$OCR_WORK/ocr" | sha256sum -c -
+          chmod 700 "$OCR_WORK/ocr"
+          "$OCR_WORK/ocr" version
+
+      - name: Select trusted base rules or organization defaults
+        id: rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          rule="$GITHUB_WORKSPACE/trusted-ocr/ops/ocr/rules.json"
+          background="$GITHUB_WORKSPACE/trusted-ocr/ops/ocr/background.md"
+          if [[ -f "$GITHUB_WORKSPACE/target-repo/ops/ocr/rules.json" && ! -L "$GITHUB_WORKSPACE/target-repo/ops/ocr/rules.json" ]]; then
+            rule="$GITHUB_WORKSPACE/target-repo/ops/ocr/rules.json"
+          fi
+          if [[ -f "$GITHUB_WORKSPACE/target-repo/ops/ocr/background.md" && ! -L "$GITHUB_WORKSPACE/target-repo/ops/ocr/background.md" ]]; then
+            background="$GITHUB_WORKSPACE/target-repo/ops/ocr/background.md"
+          fi
+          printf 'rule=%s\n' "$rule" >> "$GITHUB_OUTPUT"
+          printf 'background=%s\n' "$background" >> "$GITHUB_OUTPUT"
+
+      - name: Run advisory review
+        id: ocr
+        env:
+          OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_USE_ANTHROPIC }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+          OCR_LLM_TIMEOUT: '120'
+          OCR_RULE_PATH: ${{ steps.rules.outputs.rule }}
+          OCR_BACKGROUND_PATH: ${{ steps.rules.outputs.background }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$OCR_LLM_URL" && test -n "$OCR_LLM_MODEL" && test -n "$OCR_LLM_TOKEN"
+          case "$OCR_USE_ANTHROPIC" in true|false) ;; *) echo 'OCR_USE_ANTHROPIC must be true or false' >&2; exit 1 ;; esac
+          export HOME="$OCR_WORK/home"
+          mkdir -m 700 "$HOME"
+          set +e
+          "$OCR_WORK/ocr" review --repo "$GITHUB_WORKSPACE/target-repo" \
+            --from "$(cat "$OCR_WORK/merge-base")" --to "$HEAD_SHA" \
+            --rule "$OCR_RULE_PATH" --background-file "$OCR_BACKGROUND_PATH" \
+            --audience agent --format json --output "$OCR_WORK/result.json" \
+            --concurrency 2 --effort low --timeout 10 --max-tokens-budget 500000 \
+            > "$OCR_WORK/stdout" 2> "$OCR_WORK/stderr"
+          code=$?
+          set -e
+          printf '%s\n' "$code" > "$OCR_WORK/exit-code"
+          exit "$code"
+
+      - name: Publish review and coverage status
+        if: ${{ always() && steps.target.outcome == 'success' && steps.shared.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          OCR_STEP_OUTCOME: ${{ steps.ocr.outcome }}
+        shell: bash
+        run: python3 "$GITHUB_WORKSPACE/trusted-ocr/ops/ocr/publish.py"
+
+      - name: Cleanup review data
+        if: ${{ always() }}
+        shell: bash
+        run: if [[ -n "${OCR_WORK:-}" ]]; then rm -rf -- "$OCR_WORK"; fi
