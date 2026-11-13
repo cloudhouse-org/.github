@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   authorize:
-    if: github.repository_owner == 'cloudhouse-org'
+    if: github.repository_owner == 'cloudhouse-org' && github.event.repository.private == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -34,13 +34,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           CALLER_EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ inputs.pr_number }}
           OCR_REVIEW_ENABLED: ${{ vars.OCR_REVIEW_ENABLED }}
           OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_USE_ANTHROPIC }}
-          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -48,7 +48,9 @@ jobs:
           reason=not_eligible
           base_sha=
           head_sha=
-          if [[ "$REPOSITORY_OWNER" != "cloudhouse-org" ]]; then
+          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
+            reason=private_repository_required
+          elif [[ "$REPOSITORY_OWNER" != "cloudhouse-org" ]]; then
             reason=outside_organization
           elif [[ "$CALLER_EVENT" != "pull_request_target" && "$CALLER_EVENT" != "workflow_dispatch" ]]; then
             reason=unsupported_event
@@ -56,8 +58,6 @@ jobs:
             reason=invalid_pr_number
           elif [[ "$OCR_REVIEW_ENABLED" != "true" ]]; then
             reason=disabled
-          elif [[ -z "$OCR_LLM_TOKEN" ]]; then
-            reason=missing_ocr_llm_token
           elif [[ "$OCR_LLM_URL" != https://* || -z "$OCR_LLM_MODEL" ]]; then
             reason=invalid_model_configuration
           elif [[ "$OCR_USE_ANTHROPIC" != "true" && "$OCR_USE_ANTHROPIC" != "false" ]]; then
@@ -188,14 +188,31 @@ jobs:
           OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_USE_ANTHROPIC }}
-          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
           OCR_LLM_TIMEOUT: '120'
           OCR_RULE_PATH: ${{ steps.rules.outputs.rule }}
           OCR_BACKGROUND_PATH: ${{ steps.rules.outputs.background }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$OCR_LLM_URL" && test -n "$OCR_LLM_MODEL" && test -n "$OCR_LLM_TOKEN"
+          token_dir=/etc/cloudhouse-review
+          token_file="$token_dir/ocr-token"
+          if [[ -L "$token_dir" || ! -d "$token_dir" || -L "$token_file" || ! -f "$token_file" || ! -r "$token_file" ]]; then
+            echo 'OCR local token file is missing or unsafe' >&2
+            exit 1
+          fi
+          if [[ "$(stat -c '%U:%G:%a' "$token_dir")" != 'root:cloudhouse-review:750' || "$(stat -c '%U:%G:%a' "$token_file")" != 'root:cloudhouse-review:640' ]]; then
+            echo 'OCR local token ownership or permissions are unsafe' >&2
+            exit 1
+          fi
+          OCR_LLM_TOKEN="$(cat -- "$token_file")"
+          if [[ -z "$OCR_LLM_TOKEN" ]]; then
+            echo 'OCR local token is empty' >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$OCR_LLM_TOKEN"
+          export OCR_LLM_TOKEN
+          trap 'unset OCR_LLM_TOKEN' EXIT
+          test -n "$OCR_LLM_URL" && test -n "$OCR_LLM_MODEL"
           case "$OCR_USE_ANTHROPIC" in true|false) ;; *) echo 'OCR_USE_ANTHROPIC must be true or false' >&2; exit 1 ;; esac
           export HOME="$OCR_WORK/home"
           mkdir -m 700 "$HOME"

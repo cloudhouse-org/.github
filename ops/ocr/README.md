@@ -11,18 +11,22 @@
 - `cloudhouse-review` runner group 必须限制为本可复用 workflow 的完整路径和固定 SHA。不要把标签当作权限边界，也不要将此 runner 加入 CI 或 production runner group。
 - 检查是建议性的，不自动批准或请求变更；不要将 OCR 状态设为合并必需检查。
 
-## Actions 配置
+## 配置与本机凭据
 
-组织级变量：
+仅在 `cloudhouse-org` 的**未归档私有仓库**安装调用 workflow。可复用 workflow 会再次检查仓库为私有、PR 仍开放、base 属于当前仓库，并且 PR 作者的 `author_association` 为 `MEMBER` 或 `OWNER`；公共仓库不会进入审查任务。`cloudhouse-review` runner group 禁止公共仓库，并只允许调用固定 SHA 的本可复用 workflow。
 
-| 名称 | 示例/要求 |
+每个私有仓库单独配置以下 Actions variables（变量不是凭据）：
+
+| 名称 | 要求 |
 | --- | --- |
 | `OCR_REVIEW_ENABLED` | 严格设为 `true` 才启用 |
 | `OCR_LLM_URL` | 使用 HTTPS 的兼容 API 地址 |
 | `OCR_LLM_MODEL` | 模型标识 |
 | `OCR_USE_ANTHROPIC` | `true` 或 `false` |
 
-组织级 Actions secret：`OCR_LLM_TOKEN`。只向安装了组织触发 workflow 的仓库开放。若变量、token 或模型配置不完整，授权 job 会说明跳过原因，不会把 job 派给自托管 runner。
+GitHub Actions secret 不用于这条链路。模型 token 只保存在 dyw-003 的 `/etc/cloudhouse-review/ocr-token`，所有者为 `root:cloudhouse-review`、权限为 `0640`；父目录为 `root:cloudhouse-review`、权限为 `0750`。只有专用 `cloudhouse-review` runner 账户所属组可以读取。审查步骤仅在运行时读取，并将 token 限定在该步骤的进程环境中，不写入 workflow 输出或 GitHub 日志。
+
+在 dyw-003 上以 root 交互运行 `ops/ocr/setup-runner-token.sh`，在隐藏提示中输入专用模型 token。脚本不会回显或覆盖已有 token 文件。不要把 token 写进命令参数、仓库、Issue、PR 或聊天；轮换时按运维流程先移除旧文件再重新安装。若本机凭据文件或权限不符合要求，审查任务会失败关闭。
 
 无需 `OCR_ORG_MEMBERSHIP_TOKEN`：成员资格以 GitHub 返回的 PR `author_association` 判断，并在发布时复核。
 
@@ -32,4 +36,4 @@
 
 OpenCodeReview Linux x64 二进制固定为 v1.12.11，并按 SHA-256 校验。每次最多 500,000 tokens、2 路并发、单次分析 10 分钟、job 45 分钟、模型请求超时 120 秒。模型服务商会收到审查所需的 PR diff 和可信背景；必须确保该数据处理符合组织的代码与隐私策略，并在服务商侧设置账户限额。
 
-GitHub 对公共仓库自托管 runner 有额外风险提示。为覆盖组织公共仓库，runner group 可启用 public repository access，但必须继续限制为固定 SHA 的本可复用 workflow；该 workflow 不执行 PR 代码。若修改访问限制，重新核对所有允许的 workflow 路径。
+不为公共仓库开启 `cloudhouse-review` runner group。即使当前 workflow 不执行 PR 代码，公共仓库和外部贡献场景也不属于此本机凭据审查的信任范围。
