@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   authorize:
-    if: github.repository_owner == 'cloudhouse-org' && github.event.repository.private == true
+    if: github.repository_owner == 'cloudhouse-org'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -34,7 +34,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           CALLER_EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ inputs.pr_number }}
           OCR_REVIEW_ENABLED: ${{ vars.OCR_REVIEW_ENABLED }}
@@ -47,9 +46,7 @@ jobs:
           reason=not_eligible
           base_sha=
           head_sha=
-          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
-            reason=private_repository_required
-          elif [[ "$REPOSITORY_OWNER" != "cloudhouse-org" ]]; then
+          if [[ "$REPOSITORY_OWNER" != "cloudhouse-org" ]]; then
             reason=outside_organization
           elif [[ "$CALLER_EVENT" != "pull_request_target" && "$CALLER_EVENT" != "workflow_dispatch" ]]; then
             reason=unsupported_event
