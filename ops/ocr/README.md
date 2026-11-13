@@ -20,11 +20,10 @@
 | 名称 | 要求 |
 | --- | --- |
 | `OCR_REVIEW_ENABLED` | 严格设为 `true` 才启用 |
-| `OCR_LLM_URL` | 使用 HTTPS 的兼容 API 地址 |
 | `OCR_LLM_MODEL` | 模型标识 |
 | `OCR_USE_ANTHROPIC` | `true` 或 `false` |
 
-GitHub Actions secret 不用于这条链路。模型 token 只保存在 dyw-003 的 `/etc/cloudhouse-review/ocr-token`，所有者为 `root:cloudhouse-review`、权限为 `0640`；父目录为 `root:cloudhouse-review`、权限为 `0750`。只有专用 `cloudhouse-review` runner 账户所属组可以读取。审查步骤仅在运行时读取，并将 token 限定在该步骤的进程环境中，不写入 workflow 输出或 GitHub 日志。
+API 地址固定为 `https://coding.dashscope.aliyuncs.com/v1`，不读取仓库可修改的 URL 变量，避免把 dyw-003 本机 token 转发到其他地址。每个私有仓库只需配置模型标识和协议变量。GitHub Actions secret 不用于这条链路。模型 token 只保存在 dyw-003 的 `/etc/cloudhouse-review/ocr-token`，所有者为 `root:cloudhouse-review`、权限为 `0640`；父目录为 `root:cloudhouse-review`、权限为 `0750`。只有专用 `cloudhouse-review` runner 账户所属组可以读取。审查步骤仅在运行时读取，并将 token 限定在该步骤的进程环境中，不写入 workflow 输出或 GitHub 日志。
 
 在 dyw-003 上以 root 交互运行 `ops/ocr/setup-runner-token.sh`，在隐藏提示中输入专用模型 token。脚本不会回显或覆盖已有 token 文件。不要把 token 写进命令参数、仓库、Issue、PR 或聊天；轮换时按运维流程先移除旧文件再重新安装。若本机凭据文件或权限不符合要求，审查任务会失败关闭。
 
