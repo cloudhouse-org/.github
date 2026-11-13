@@ -1,0 +1,23 @@
+name: Organization OCR review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number to review
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  ocr:
+    if: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.draft == false }}
+    uses: cloudhouse-org/.github/.github/workflows/ocr-review.yml@7aeac6903439e712bdbc7cf1b84ec60e152754b4
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
